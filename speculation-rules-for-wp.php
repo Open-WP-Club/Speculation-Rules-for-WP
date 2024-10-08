@@ -3,7 +3,7 @@
 /**
  * Plugin Name: Speculation Rules for WP
  * Description: Adds support for the Speculation Rules API to dynamically prefetch or prerender URLs based on user interaction.
- * Version: 1.0
+ * Version: 1.1.2
  * Author: Gabriel Kanev
  * Author URI: https://openwpclub.com
  */
@@ -16,12 +16,14 @@ if (!defined('ABSPATH')) {
 class Speculation_Rules_API
 {
   private $options;
+  private $cache_key = 'speculation_rules_cache';
 
   public function __construct()
   {
     add_action('admin_menu', array($this, 'add_plugin_page'));
     add_action('admin_init', array($this, 'page_init'));
     add_action('wp_head', array($this, 'add_speculation_rules'), PHP_INT_MAX);
+    add_action('save_post', array($this, 'clear_cache'));
   }
 
   public function add_plugin_page()
@@ -49,7 +51,7 @@ class Speculation_Rules_API
         ?>
       </form>
     </div>
-  <?php
+<?php
   }
 
   public function page_init()
@@ -67,54 +69,39 @@ class Speculation_Rules_API
       'speculation-rules-wp'
     );
 
-    add_settings_field(
-      'type',
-      'Type',
-      array($this, 'type_callback'),
-      'speculation-rules-wp',
-      'speculation_rules_setting_section'
+    $fields = array(
+      'type' => 'Type',
+      'eagerness' => 'Eagerness',
+      'match_urls' => 'Match URLs',
+      'exclude_urls' => 'Exclude URLs',
+      'post_types' => 'Apply to Post Types',
+      'debug_mode' => 'Debug Mode'
     );
 
-    add_settings_field(
-      'eagerness',
-      'Eagerness',
-      array($this, 'eagerness_callback'),
-      'speculation-rules-wp',
-      'speculation_rules_setting_section'
-    );
-
-    add_settings_field(
-      'match_urls',
-      'Match URLs',
-      array($this, 'match_urls_callback'),
-      'speculation-rules-wp',
-      'speculation_rules_setting_section'
-    );
-
-    add_settings_field(
-      'exclude_urls',
-      'Exclude URLs',
-      array($this, 'exclude_urls_callback'),
-      'speculation-rules-wp',
-      'speculation_rules_setting_section'
-    );
+    foreach ($fields as $field => $title) {
+      add_settings_field(
+        $field,
+        $title,
+        array($this, $field . '_callback'),
+        'speculation-rules-wp',
+        'speculation_rules_setting_section'
+      );
+    }
   }
 
   public function sanitize($input)
   {
     $sanitary_values = array();
-    if (isset($input['type'])) {
-      $sanitary_values['type'] = sanitize_text_field($input['type']);
+    $fields = array('type', 'eagerness', 'match_urls', 'exclude_urls');
+    foreach ($fields as $field) {
+      if (isset($input[$field])) {
+        $sanitary_values[$field] = sanitize_textarea_field($input[$field]);
+      }
     }
-    if (isset($input['eagerness'])) {
-      $sanitary_values['eagerness'] = sanitize_text_field($input['eagerness']);
-    }
-    if (isset($input['match_urls'])) {
-      $sanitary_values['match_urls'] = sanitize_textarea_field($input['match_urls']);
-    }
-    if (isset($input['exclude_urls'])) {
-      $sanitary_values['exclude_urls'] = sanitize_textarea_field($input['exclude_urls']);
-    }
+    // Handle post_types as an array
+    $sanitary_values['post_types'] = isset($input['post_types']) ? array_map('sanitize_text_field', $input['post_types']) : array();
+    $sanitary_values['debug_mode'] = isset($input['debug_mode']) ? 1 : 0;
+    $this->clear_cache();
     return $sanitary_values;
   }
 
@@ -125,45 +112,72 @@ class Speculation_Rules_API
 
   public function type_callback()
   {
-  ?>
-    <select name="speculation_rules_options[type]" id="type">
-      <option value="prefetch" <?php selected($this->options['type'], 'prefetch'); ?>>Prefetch – Load the page only, no subresources</option>
-      <option value="prerender" <?php selected($this->options['type'], 'prerender'); ?>>Prerender – Fully load the page and all subresources</option>
-    </select>
-    <p class="description">
-      Prerendering will lead to faster load times than prefetching. However, in case of interactive content, prefetching may be a safer choice.
-    </p>
-  <?php
+    $this->render_select('type', array(
+      'prefetch' => 'Prefetch – Load the page only, no subresources',
+      'prerender' => 'Prerender – Fully load the page and all subresources'
+    ));
   }
 
   public function eagerness_callback()
   {
-  ?>
-    <select name="speculation_rules_options[eagerness]" id="eagerness">
-      <option value="conservative" <?php selected($this->options['eagerness'], 'conservative'); ?>>Conservative (typically on click)</option>
-      <option value="moderate" <?php selected($this->options['eagerness'], 'moderate'); ?>>Moderate (typically on hover)</option>
-      <option value="eager" <?php selected($this->options['eagerness'], 'eager'); ?>>Eager (on slightest suggestion)</option>
-    </select>
-    <p class="description">
-      The eagerness setting defines the heuristics based on which the loading is triggered. "Eager" will have the minimum delay to start speculative loads, "Conservative" increases the chance that only URLs the user actually navigates to are loaded.
-    </p>
-  <?php
+    $this->render_select('eagerness', array(
+      'conservative' => 'Conservative (typically on click)',
+      'moderate' => 'Moderate (typically on hover)',
+      'eager' => 'Eager (on slightest suggestion)'
+    ));
   }
 
   public function match_urls_callback()
   {
-  ?>
-    <textarea name="speculation_rules_options[match_urls]" id="match_urls" rows="5" cols="50"><?php echo isset($this->options['match_urls']) ? esc_textarea($this->options['match_urls']) : ''; ?></textarea>
-    <p class="description">Enter URLs to prefetch or prerender (one per line). Example: /*, /products/*, /services</p>
-  <?php
+    $this->render_textarea('match_urls', 'Enter URLs to prefetch or prerender (one per line). Example: /*, /products/*, /services');
   }
 
   public function exclude_urls_callback()
   {
-  ?>
-    <textarea name="speculation_rules_options[exclude_urls]" id="exclude_urls" rows="5" cols="50"><?php echo isset($this->options['exclude_urls']) ? esc_textarea($this->options['exclude_urls']) : ''; ?></textarea>
-    <p class="description">Enter URLs to exclude from prefetching or prerendering (one per line).</p>
-<?php
+    $this->render_textarea('exclude_urls', 'Enter URLs to exclude from prefetching or prerendering (one per line).');
+  }
+
+  public function post_types_callback()
+  {
+    $post_types = get_post_types(array('public' => true), 'objects');
+    foreach ($post_types as $post_type) {
+      $this->render_checkbox('post_types[]', $post_type->name, $post_type->label, 'post_types');
+    }
+  }
+
+  public function debug_mode_callback()
+  {
+    $this->render_checkbox('debug_mode', 1, 'Enable debug mode', 'debug_mode');
+  }
+
+  private function render_select($name, $options)
+  {
+    echo "<select name='speculation_rules_options[$name]' id='$name'>";
+    foreach ($options as $value => $label) {
+      $selected = (isset($this->options[$name]) && $this->options[$name] === $value) ? 'selected' : '';
+      echo "<option value='$value' $selected>$label</option>";
+    }
+    echo "</select>";
+  }
+
+  private function render_textarea($name, $description)
+  {
+    $value = isset($this->options[$name]) ? esc_textarea($this->options[$name]) : '';
+    echo "<textarea name='speculation_rules_options[$name]' id='$name' rows='5' cols='50'>$value</textarea>";
+    echo "<p class='description'>$description</p>";
+  }
+
+  private function render_checkbox($name, $value, $label, $option_name)
+  {
+    $checked = '';
+    if (isset($this->options[$option_name])) {
+      if (is_array($this->options[$option_name])) {
+        $checked = in_array($value, $this->options[$option_name]) ? 'checked' : '';
+      } else {
+        $checked = ($this->options[$option_name] == $value) ? 'checked' : '';
+      }
+    }
+    echo "<label><input type='checkbox' name='speculation_rules_options[$name]' value='$value' $checked> $label</label><br>";
   }
 
   public function add_speculation_rules()
@@ -173,6 +187,36 @@ class Speculation_Rules_API
       return;
     }
 
+    // Check if we should apply rules to this post type
+    if (!empty($options['post_types']) && is_singular()) {
+      $post_type = get_post_type();
+      if (!in_array($post_type, $options['post_types'])) {
+        return;
+      }
+    }
+
+    $cache = get_transient($this->cache_key);
+    if ($cache === false) {
+      $rules = $this->generate_rules($options);
+      set_transient($this->cache_key, $rules, HOUR_IN_SECONDS);
+    } else {
+      $rules = $cache;
+    }
+
+    if (!empty($rules)) {
+      echo "<!-- Speculation Rules added by Speculation Rules for WP plugin -->\n";
+      echo "<script type=\"speculationrules\">\n";
+      echo json_encode($rules, JSON_PRETTY_PRINT);
+      echo "\n</script>\n";
+    }
+
+    if (!empty($options['debug_mode'])) {
+      $this->add_debug_info($rules);
+    }
+  }
+
+  private function generate_rules($options)
+  {
     $type = isset($options['type']) ? $options['type'] : 'prefetch';
     $eagerness = isset($options['eagerness']) ? $options['eagerness'] : 'moderate';
     $match_urls = isset($options['match_urls']) ? explode("\n", $options['match_urls']) : array();
@@ -203,12 +247,21 @@ class Speculation_Rules_API
       }
     }
 
-    if (!empty($rules[$type])) {
-      echo "<!-- Speculation Rules added by Speculation Rules for WP plugin -->\n";
-      echo "<script type=\"speculationrules\">\n";
-      echo json_encode(array('prerender' => $rules[$type]), JSON_PRETTY_PRINT);
-      echo "\n</script>\n";
-    }
+    return $rules;
+  }
+
+  private function add_debug_info($rules)
+  {
+    echo "<!-- Speculation Rules Debug Info:\n";
+    echo "Rules: " . print_r($rules, true) . "\n";
+    echo "Current Post Type: " . get_post_type() . "\n";
+    echo "Enabled Post Types: " . implode(', ', $this->options['post_types']) . "\n";
+    echo "-->\n";
+  }
+
+  public function clear_cache()
+  {
+    delete_transient($this->cache_key);
   }
 }
 
