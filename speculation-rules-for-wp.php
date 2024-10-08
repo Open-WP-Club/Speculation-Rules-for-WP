@@ -3,7 +3,7 @@
 /**
  * Plugin Name: Speculation Rules for WP
  * Description: Adds support for the Speculation Rules API to dynamically prefetch or prerender URLs based on user interaction.
- * Version: 1.1.5
+ * Version: 1.1.0
  * Author: Gabriel Kanev
  * Author URI: https://openwpclub.com
  */
@@ -145,7 +145,7 @@ class Speculation_Rules_API
 
   public function match_urls_callback()
   {
-    $this->render_textarea('match_urls', 'Enter URLs to prefetch or prerender (one per line). Example: /*, /products/*, /services');
+    $this->render_textarea('match_urls', 'Enter URLs to prefetch or prerender (one per line). Example: /* or  /services');
   }
 
   public function exclude_urls_callback()
@@ -231,11 +231,44 @@ class Speculation_Rules_API
     $eagerness = isset($options['eagerness']) ? $options['eagerness'] : 'moderate';
     $match_urls = isset($options['match_urls']) ? explode("\n", $options['match_urls']) : array();
     $exclude_urls = isset($options['exclude_urls']) ? explode("\n", $options['exclude_urls']) : array();
+    $post_types = isset($options['post_types']) ? $options['post_types'] : array();
 
     $rules = array(
       $type => array()
     );
 
+    // Add rules for post types
+    foreach ($post_types as $post_type) {
+      $urls = array();
+
+      // Add archive URL if it exists
+      $archive_url = get_post_type_archive_link($post_type);
+      if ($archive_url) {
+        $urls[] = $archive_url;
+      }
+
+      // Add URL pattern for single posts of this type
+      $urls[] = home_url('/' . $post_type . '/*');
+
+      if (!empty($urls)) {
+        $rule = array(
+          'source' => 'list',
+          'urls' => $urls,
+          'eagerness' => $eagerness
+        );
+
+        if (!empty($exclude_urls)) {
+          $rule['not'] = array(
+            'source' => 'list',
+            'urls' => array_map('trim', $exclude_urls)
+          );
+        }
+
+        $rules[$type][] = $rule;
+      }
+    }
+
+    // Add rules for custom URLs
     foreach ($match_urls as $url) {
       $url = trim($url);
       if (!empty($url)) {
@@ -279,10 +312,14 @@ class Speculation_Rules_API
   {
     if (isset($_GET['page']) && $_GET['page'] === 'speculation-rules-wp') {
       $options = get_option('speculation_rules_options');
-      echo '<div class="notice notice-info is-dismissible">';
-      echo '<p>Debug Info:</p>';
-      echo '<pre>' . print_r($options, true) . '</pre>';
-      echo '</div>';
+
+      // Only display debug info if debug mode is enabled
+      if (isset($options['debug_mode']) && $options['debug_mode']) {
+        echo '<div class="notice notice-info is-dismissible">';
+        echo '<p>Debug Info:</p>';
+        echo '<pre>' . print_r($options, true) . '</pre>';
+        echo '</div>';
+      }
     }
   }
 }
