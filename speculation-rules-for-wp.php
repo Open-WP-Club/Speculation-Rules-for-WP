@@ -3,7 +3,7 @@
 /**
  * Plugin Name: Speculation Rules for WP
  * Description: Adds support for the Speculation Rules API to dynamically prefetch or prerender URLs based on user interaction.
- * Version: 1.1.2
+ * Version: 1.1.5
  * Author: Gabriel Kanev
  * Author URI: https://openwpclub.com
  */
@@ -24,6 +24,7 @@ class Speculation_Rules_API
     add_action('admin_init', array($this, 'page_init'));
     add_action('wp_head', array($this, 'add_speculation_rules'), PHP_INT_MAX);
     add_action('save_post', array($this, 'clear_cache'));
+    add_action('admin_notices', array($this, 'display_debug_info'));
   }
 
   public function add_plugin_page()
@@ -98,9 +99,24 @@ class Speculation_Rules_API
         $sanitary_values[$field] = sanitize_textarea_field($input[$field]);
       }
     }
+
     // Handle post_types as an array
-    $sanitary_values['post_types'] = isset($input['post_types']) ? array_map('sanitize_text_field', $input['post_types']) : array();
+    $sanitary_values['post_types'] = isset($input['post_types']) ? $input['post_types'] : array();
+
+    // Ensure post_types is always an array
+    if (!is_array($sanitary_values['post_types'])) {
+      $sanitary_values['post_types'] = array($sanitary_values['post_types']);
+    }
+
+    // Sanitize each post type
+    $sanitary_values['post_types'] = array_map('sanitize_text_field', $sanitary_values['post_types']);
+
     $sanitary_values['debug_mode'] = isset($input['debug_mode']) ? 1 : 0;
+
+    // Debug: Log the input and sanitized values
+    error_log('Speculation Rules Debug - Input: ' . print_r($input, true));
+    error_log('Speculation Rules Debug - Sanitized: ' . print_r($sanitary_values, true));
+
     $this->clear_cache();
     return $sanitary_values;
   }
@@ -141,13 +157,17 @@ class Speculation_Rules_API
   {
     $post_types = get_post_types(array('public' => true), 'objects');
     foreach ($post_types as $post_type) {
-      $this->render_checkbox('post_types[]', $post_type->name, $post_type->label, 'post_types');
+      $checked = isset($this->options['post_types']) && in_array($post_type->name, $this->options['post_types']) ? 'checked' : '';
+      echo "<label><input type='checkbox' name='speculation_rules_options[post_types][]' value='{$post_type->name}' {$checked}> {$post_type->label}</label><br>";
     }
+    // Debug: Output current post_types value
+    echo '<div style="margin-top: 10px; color: #666;">Current saved post types: ' . implode(', ', $this->options['post_types'] ?? array()) . '</div>';
   }
 
   public function debug_mode_callback()
   {
-    $this->render_checkbox('debug_mode', 1, 'Enable debug mode', 'debug_mode');
+    $checked = isset($this->options['debug_mode']) && $this->options['debug_mode'] ? 'checked' : '';
+    echo "<label><input type='checkbox' name='speculation_rules_options[debug_mode]' value='1' {$checked}> Enable debug mode</label>";
   }
 
   private function render_select($name, $options)
@@ -167,47 +187,37 @@ class Speculation_Rules_API
     echo "<p class='description'>$description</p>";
   }
 
-  private function render_checkbox($name, $value, $label, $option_name)
-  {
-    $checked = '';
-    if (isset($this->options[$option_name])) {
-      if (is_array($this->options[$option_name])) {
-        $checked = in_array($value, $this->options[$option_name]) ? 'checked' : '';
-      } else {
-        $checked = ($this->options[$option_name] == $value) ? 'checked' : '';
-      }
-    }
-    echo "<label><input type='checkbox' name='speculation_rules_options[$name]' value='$value' $checked> $label</label><br>";
-  }
-
   public function add_speculation_rules()
   {
     $options = get_option('speculation_rules_options');
     if (!$options) {
+      error_log('Speculation Rules Debug: No options found');
       return;
     }
+
+    // Debug: Log the current options
+    error_log('Speculation Rules Debug - Current Options: ' . print_r($options, true));
 
     // Check if we should apply rules to this post type
     if (!empty($options['post_types']) && is_singular()) {
       $post_type = get_post_type();
       if (!in_array($post_type, $options['post_types'])) {
+        error_log('Speculation Rules Debug: Post type not in selected types');
         return;
       }
     }
 
-    $cache = get_transient($this->cache_key);
-    if ($cache === false) {
-      $rules = $this->generate_rules($options);
-      set_transient($this->cache_key, $rules, HOUR_IN_SECONDS);
-    } else {
-      $rules = $cache;
-    }
+    // Generate rules directly, bypassing cache for now
+    $rules = $this->generate_rules($options);
 
     if (!empty($rules)) {
       echo "<!-- Speculation Rules added by Speculation Rules for WP plugin -->\n";
       echo "<script type=\"speculationrules\">\n";
       echo json_encode($rules, JSON_PRETTY_PRINT);
       echo "\n</script>\n";
+      error_log('Speculation Rules Debug: Rules added to head');
+    } else {
+      error_log('Speculation Rules Debug: No rules generated');
     }
 
     if (!empty($options['debug_mode'])) {
@@ -223,8 +233,7 @@ class Speculation_Rules_API
     $exclude_urls = isset($options['exclude_urls']) ? explode("\n", $options['exclude_urls']) : array();
 
     $rules = array(
-      'prerender' => array(),
-      'prefetch' => array()
+      $type => array()
     );
 
     foreach ($match_urls as $url) {
@@ -247,6 +256,8 @@ class Speculation_Rules_API
       }
     }
 
+    error_log('Speculation Rules Debug - Generated Rules: ' . print_r($rules, true));
+
     return $rules;
   }
 
@@ -255,13 +266,24 @@ class Speculation_Rules_API
     echo "<!-- Speculation Rules Debug Info:\n";
     echo "Rules: " . print_r($rules, true) . "\n";
     echo "Current Post Type: " . get_post_type() . "\n";
-    echo "Enabled Post Types: " . implode(', ', $this->options['post_types']) . "\n";
+    echo "Enabled Post Types: " . implode(', ', $this->options['post_types'] ?? array()) . "\n";
     echo "-->\n";
   }
 
   public function clear_cache()
   {
     delete_transient($this->cache_key);
+  }
+
+  public function display_debug_info()
+  {
+    if (isset($_GET['page']) && $_GET['page'] === 'speculation-rules-wp') {
+      $options = get_option('speculation_rules_options');
+      echo '<div class="notice notice-info is-dismissible">';
+      echo '<p>Debug Info:</p>';
+      echo '<pre>' . print_r($options, true) . '</pre>';
+      echo '</div>';
+    }
   }
 }
 
